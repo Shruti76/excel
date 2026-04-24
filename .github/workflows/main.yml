@@ -1,0 +1,158 @@
+name: Excel File Analysis Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      excel_file:
+        description: 'Upload Excel file for analysis'
+        required: true
+        type: string
+      analysis_type:
+        description: 'Type of analysis to perform'
+        required: true
+        type: choice
+        options:
+          - 'full_schedule'
+          - 'validate_data'
+          - 'team_assignment'
+          - 'site_exclusion'
+      exclude_critical_sites:
+        description: 'Exclude critical rooftop sites?'
+        required: true
+        type: boolean
+        default: true
+      months_back:
+        description: 'Exclude sites visited in last N months'
+        required: false
+        type: string
+        default: '3'
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      file_path: ${{ steps.file.outputs.path }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create data directory
+        run: mkdir -p data/uploads data/output
+
+      - name: Store file path
+        id: file
+        run: echo "path=data/uploads/${{ github.event.inputs.excel_file }}" >> $GITHUB_OUTPUT
+
+  validate:
+    runs-on: ubuntu-latest
+    needs: setup
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install --no-cache-dir pandas openpyxl numpy python-dateutil
+          echo "✅ Dependencies installed"
+
+      - name: Validate Excel file structure
+        run: |
+          python scripts/validate_input.py \
+            --file "${{ needs.setup.outputs.file_path }}" \
+            --log data/output/validation_report.txt
+
+      - name: Upload validation report
+        uses: actions/upload-artifact@v3
+        with:
+          name: validation-report
+          path: data/output/validation_report.txt
+
+  analyze:
+    runs-on: ubuntu-latest
+    needs: [setup, validate]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install --no-cache-dir pandas openpyxl numpy python-dateutil
+          echo "✅ Dependencies installed"
+
+      - name: Run site visit schedule analysis
+        run: |
+          python scripts/main_analysis.py \
+            --input "${{ needs.setup.outputs.file_path }}" \
+            --output data/output \
+            --analysis-type "${{ github.event.inputs.analysis_type }}" \
+            --exclude-critical "${{ github.event.inputs.exclude_critical_sites }}" \
+            --months-back "${{ github.event.inputs.months_back }}" \
+            --log data/output/analysis_log.txt
+
+      - name: Generate team assignments
+        run: |
+          python scripts/team_assignment.py \
+            --schedule data/output/sites_schedule.csv \
+            --output data/output/team_assignments.csv \
+            --log data/output/team_assignment_log.txt
+
+      - name: Create final report
+        run: |
+          python scripts/generate_report.py \
+            --input data/output \
+            --output data/output/final_report.xlsx \
+            --log data/output/report_log.txt
+
+  upload-results:
+    runs-on: ubuntu-latest
+    needs: analyze
+    if: always()
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Upload analysis results
+        uses: actions/upload-artifact@v3
+        with:
+          name: analysis-results
+          path: data/output/
+          retention-days: 30
+
+      - name: Create GitHub Release with outputs
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            data/output/final_report.xlsx
+            data/output/team_assignments.csv
+            data/output/sites_schedule.csv
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: [analyze, upload-results]
+    if: always()
+    steps:
+      - name: Create job summary
+        run: |
+          echo "## Excel Analysis Pipeline Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Analysis Results:" >> $GITHUB_STEP_SUMMARY
+          echo "- **Analysis Type**: ${{ github.event.inputs.analysis_type }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Exclude Critical Sites**: ${{ github.event.inputs.exclude_critical_sites }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Months Excluded**: ${{ github.event.inputs.months_back }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Results available in Artifacts section" >> $GITHUB_STEP_SUMMARY
