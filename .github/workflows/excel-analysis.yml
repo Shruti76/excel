@@ -1,4 +1,4 @@
-name: Excel File Analysis Pipeline
+name: Excel File Analysis Pipelines
 
 on:
   workflow_dispatch:
