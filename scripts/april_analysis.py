@@ -32,6 +32,9 @@ class AprilReportGenerator:
         self.log = []
         self.report_date = datetime(2026, 4, 1)  # April 2026
         
+        # High-risk site IDs to exclude (from RT High Risk List)
+        self.high_risk_site_ids = set()
+        
         # Loaded data
         self.site_master = None
         self.hts_calendar = None
@@ -53,49 +56,78 @@ class AprilReportGenerator:
     
     def load_files(self, file_dict: Dict[str, str]) -> bool:
         """
-        Load all 5 file types.
+        Load all 5 file types and extract high-risk site IDs to exclude.
         
         Args:
             file_dict: Dictionary with keys:
-                - 'site_master': Colo_Sonatel-APS.xlsx
-                - 'hts_calendar': HTS Site Visits Calendar
-                - 'pm_assignments': PM_ZONE1_2_MARS_2026.xlsx
-                - 'project_sites': Project sites BNS plan
-                - 'critical_sites': RT High Risk List
+                - 'site_master': Colo_Sonatel-APS.xlsx (Helios Site ID → YAS SID)
+                - 'hts_calendar': HTS Site Visits Calendar (Preventive Maintenance activity data)
+                - 'pm_assignments': PM_ZONE1_2_MARS_2026.xlsx (Helios Site ID → YAS SID + Lat/Long)
+                - 'project_sites': Project sites BNS plan (Helios Site ID → YAS ID + Lat/Long)
+                - 'critical_sites': RT High Risk List (Sites to EXCLUDE - Helios/YAS IDs)
         """
         try:
+            # Load Critical Sites FIRST (File 5) - to extract high-risk site IDs for exclusion
+            self.high_risk_site_ids = set()
+            if 'critical_sites' in file_dict:
+                self.critical_sites = pd.read_excel(file_dict['critical_sites'], sheet_name=0)
+                # Extract all Helios Site IDs and YAS IDs from high-risk list
+                id_cols = [c for c in self.critical_sites.columns if 'id' in c.lower() or 'sid' in c.lower()]
+                for col in id_cols:
+                    self.high_risk_site_ids.update(
+                        self.critical_sites[col].dropna().astype(str).unique()
+                    )
+                self.log_message(f"⚠️  Loaded High Risk Sites: {len(self.high_risk_site_ids)} sites to EXCLUDE")
+            
             # Load site master (File 1)
             if 'site_master' in file_dict:
                 self.site_master = pd.read_excel(file_dict['site_master'], sheet_name=0)
-                self.log_message(f"✅ Loaded Site Master: {len(self.site_master)} sites")
+                # Filter out high-risk sites
+                id_cols = [c for c in self.site_master.columns if 'id' in c.lower() or 'sid' in c.lower()]
+                initial_count = len(self.site_master)
+                for col in id_cols:
+                    self.site_master = self.site_master[~self.site_master[col].astype(str).isin(self.high_risk_site_ids)]
+                self.log_message(f"✅ Loaded Site Master: {len(self.site_master)} sites (excluded {initial_count - len(self.site_master)} high-risk)")
             
-            # Load HTS Calendar (File 2)
+            # Load HTS Calendar (File 2) - Preventive Maintenance planning schedule
             if 'hts_calendar' in file_dict:
                 self.hts_calendar = pd.read_excel(file_dict['hts_calendar'], sheet_name='Planning')
-                self.log_message(f"✅ Loaded HTS Calendar: {self.hts_calendar.shape}")
+                # Filter out high-risk sites from HTS Calendar
+                id_cols = [c for c in self.hts_calendar.columns if 'id' in c.lower() or 'sid' in c.lower()]
+                initial_count = len(self.hts_calendar)
+                for col in id_cols:
+                    self.hts_calendar = self.hts_calendar[~self.hts_calendar[col].astype(str).isin(self.high_risk_site_ids)]
+                self.log_message(f"✅ Loaded HTS Calendar: {len(self.hts_calendar)} records (excluded {initial_count - len(self.hts_calendar)} high-risk)")
             
-            # Load PM Assignments (File 3)
+            # Load PM Assignments (File 3) - Preventive Maintenance activity assignments
             if 'pm_assignments' in file_dict:
-                self.pm_assignments = pd.read_excel(file_dict['pm_assignments'])
-                self.log_message(f"✅ Loaded PM Assignments: {len(self.pm_assignments)} records")
+                self.pm_assignments = pd.read_excel(file_dict['pm_assignments'], sheet_name=0)
+                # Filter out high-risk sites from PM assignments
+                id_cols = [c for c in self.pm_assignments.columns if 'id' in c.lower() or 'sid' in c.lower()]
+                initial_count = len(self.pm_assignments)
+                for col in id_cols:
+                    self.pm_assignments = self.pm_assignments[~self.pm_assignments[col].astype(str).isin(self.high_risk_site_ids)]
+                self.log_message(f"✅ Loaded PM Assignments: {len(self.pm_assignments)} records (excluded {initial_count - len(self.pm_assignments)} high-risk)")
             
             # Load Project Sites (File 4)
             if 'project_sites' in file_dict:
-                df = pd.read_excel(file_dict['project_sites'])
+                df = pd.read_excel(file_dict['project_sites'], sheet_name=0)
                 # Clean up the dataframe - remove empty rows/columns
                 df = df.dropna(how='all').dropna(axis=1, how='all')
+                # Filter out high-risk sites from project sites
+                id_cols = [c for c in df.columns if 'id' in c.lower() or 'sid' in c.lower()]
+                initial_count = len(df)
+                for col in id_cols:
+                    df = df[~df[col].astype(str).isin(self.high_risk_site_ids)]
                 self.project_sites = df
-                self.log_message(f"✅ Loaded Project Sites: {len(self.project_sites)} sites")
-            
-            # Load Critical Sites (File 5)
-            if 'critical_sites' in file_dict:
-                self.critical_sites = pd.read_excel(file_dict['critical_sites'])
-                self.log_message(f"✅ Loaded Critical Sites: {len(self.critical_sites)} sites")
+                self.log_message(f"✅ Loaded Project Sites: {len(self.project_sites)} sites (excluded {initial_count - len(df)} high-risk)")
             
             return True
         
         except Exception as e:
             self.log_message(f"❌ Error loading files: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def extract_site_ids(self) -> set:
@@ -121,58 +153,105 @@ class AprilReportGenerator:
         return site_ids
     
     def generate_april_schedule(self) -> pd.DataFrame:
-        """Generate April visit schedule combining all sources."""
-        self.log_message("Generating April schedule...")
+        """
+        Generate April visit schedule combining all sources but EXCLUDING high-risk sites.
+        Prioritizes PM maintenance activity assignments over routine visits.
+        """
+        self.log_message("Generating April schedule (excluding high-risk sites)...")
         
-        site_ids = self.extract_site_ids()
         schedule_data = []
+        processed_sites = set()
         
-        # Group visits by week for distribution
-        april_start = datetime(2026, 4, 1)
-        weeks = {}
+        # Priority 1: Process PM Assignments (Preventive Maintenance) first
+        if self.pm_assignments is not None and len(self.pm_assignments) > 0:
+            self.log_message(f"  Processing {len(self.pm_assignments)} PM assignments...")
+            for idx, row in self.pm_assignments.iterrows():
+                # Extract site ID
+                id_cols = [c for c in self.pm_assignments.columns if 'id' in c.lower() or 'sid' in c.lower()]
+                site_id = None
+                for col in id_cols:
+                    if pd.notna(row[col]):
+                        site_id = str(row[col])
+                        break
+                
+                if site_id and site_id not in self.high_risk_site_ids and site_id not in processed_sites:
+                    processed_sites.add(site_id)
+                    schedule_data.append({
+                        'Activity': 'Preventive Maintenance',
+                        'Site ID': site_id,
+                        'Name': row.get('Name', ''),
+                        'Location Type': row.get('Indoor / Outdoor / Enclosure', ''),
+                        'Latitude': row.get('Latitude', ''),
+                        'Longitude': row.get('Longitude', ''),
+                        'Region': row.get('Region', ''),
+                        'Month': 'April',
+                        'Technical Staff': row.get('Technical HTS staff', ''),
+                        'Non-Tech Staff 1': row.get('No Technical HTS Staff_1', ''),
+                        'Non-Tech Staff 2': row.get('No Technical HTS Staff_2', ''),
+                        'Date': row.get('Planned or Started date', datetime(2026, 4, 1)),
+                        'SARID': row.get('SARID', '')
+                    })
         
-        for site_id in site_ids:
-            # Determine visit type
-            visit_types = []
-            
-            # Check if in critical sites
-            if self.critical_sites is not None:
-                id_cols = [c for c in self.critical_sites.columns if 'id' in c.lower()]
-                if any(self.critical_sites[col].isin([site_id]).any() for col in id_cols):
-                    visit_types.append('CRITICAL')
-            
-            # Check if in PM assignments
-            if self.pm_assignments is not None:
-                id_cols = [c for c in self.pm_assignments.columns if 'id' in c.lower()]
-                if any(self.pm_assignments[col].isin([site_id]).any() for col in id_cols):
-                    visit_types.append('PM')
-            
-            # Check if in project sites
-            if self.project_sites is not None:
-                id_cols = [c for c in self.project_sites.columns if 'id' in c.lower()]
-                if any(self.project_sites[col].isin([site_id]).any() for col in id_cols):
-                    visit_types.append('PROJECT')
-            
-            if not visit_types:
-                visit_types.append('ROUTINE')
-            
-            # Distribute across April (8 weeks of April)
-            week_num = len(schedule_data) % 4 + 1
-            week_date = april_start + timedelta(days=(week_num - 1) * 7)
-            
-            schedule_data.append({
-                'Site ID': site_id,
-                'Visit Type': ', '.join(visit_types),
-                'Priority': 'HIGH' if 'CRITICAL' in visit_types else ('MEDIUM' if 'PM' in visit_types else 'LOW'),
-                'Scheduled Week': f"Week {week_num}",
-                'Target Date': week_date,
-                'Status': 'Scheduled',
-                'Team': '',
-                'Duration (hours)': 4 if 'CRITICAL' in visit_types else 2
-            })
+        # Priority 2: Process Project Sites
+        if self.project_sites is not None and len(self.project_sites) > 0:
+            self.log_message(f"  Processing {len(self.project_sites)} project sites...")
+            for idx, row in self.project_sites.iterrows():
+                id_cols = [c for c in self.project_sites.columns if 'id' in c.lower() or 'sid' in c.lower()]
+                site_id = None
+                for col in id_cols:
+                    if pd.notna(row[col]):
+                        site_id = str(row[col])
+                        break
+                
+                if site_id and site_id not in self.high_risk_site_ids and site_id not in processed_sites:
+                    processed_sites.add(site_id)
+                    schedule_data.append({
+                        'Activity': 'Project Site Visit',
+                        'Site ID': site_id,
+                        'Name': row.get('Name', ''),
+                        'Location Type': row.get('Indoor / Outdoor / Enclosure', ''),
+                        'Latitude': row.get('Latitude', ''),
+                        'Longitude': row.get('Longitude', ''),
+                        'Region': row.get('Region', ''),
+                        'Month': 'April',
+                        'Technical Staff': row.get('Technical HTS staff', ''),
+                        'Non-Tech Staff 1': row.get('No Technical HTS Staff_1', ''),
+                        'Non-Tech Staff 2': row.get('No Technical HTS Staff_2', ''),
+                        'Date': row.get('Planned or Started date', datetime(2026, 4, 1)),
+                        'SARID': row.get('SARID', '')
+                    })
+        
+        # Priority 3: Process HTS Calendar (Remaining routine visits)
+        if self.hts_calendar is not None and len(self.hts_calendar) > 0:
+            self.log_message(f"  Processing {len(self.hts_calendar)} HTS calendar entries...")
+            for idx, row in self.hts_calendar.iterrows():
+                id_cols = [c for c in self.hts_calendar.columns if 'id' in c.lower() or 'sid' in c.lower()]
+                site_id = None
+                for col in id_cols:
+                    if pd.notna(row[col]):
+                        site_id = str(row[col])
+                        break
+                
+                if site_id and site_id not in self.high_risk_site_ids and site_id not in processed_sites:
+                    processed_sites.add(site_id)
+                    schedule_data.append({
+                        'Activity': row.get('Activity', 'Routine Visit'),
+                        'Site ID': site_id,
+                        'Name': row.get('Name', ''),
+                        'Location Type': row.get('Indoor / Outdoor / Enclosure', ''),
+                        'Latitude': row.get('Latitude', ''),
+                        'Longitude': row.get('Longitude', ''),
+                        'Region': row.get('Region', ''),
+                        'Month': 'April',
+                        'Technical Staff': row.get('Technical HTS staff', ''),
+                        'Non-Tech Staff 1': row.get('No Technical HTS Staff_1', ''),
+                        'Non-Tech Staff 2': row.get('No Technical HTS Staff_2', ''),
+                        'Date': row.get('Planned or Started date', datetime(2026, 4, 1)),
+                        'SARID': row.get('SARID', '')
+                    })
         
         self.april_schedule = pd.DataFrame(schedule_data)
-        self.log_message(f"✅ April schedule generated: {len(self.april_schedule)} visits")
+        self.log_message(f"✅ April schedule generated: {len(self.april_schedule)} visits (high-risk sites excluded)")
         return self.april_schedule
     
     def analyze_pm_workload(self) -> pd.DataFrame:
@@ -219,26 +298,24 @@ class AprilReportGenerator:
         stats = {
             'Report Date': self.report_date.strftime("%B %Y"),
             'Total Sites Scheduled': len(self.april_schedule) if self.april_schedule is not None else 0,
-            'Critical Sites': 0,
-            'PM Sites': 0,
-            'Project Sites': 0,
-            'Routine Sites': 0,
-            'Total PM Hours': 0,
+            'High-Risk Sites Excluded': len(self.high_risk_site_ids),
+            'Preventive Maintenance': 0,
+            'Project Site Visits': 0,
+            'Routine Visits': 0,
             'High Priority Count': 0
         }
         
-        if self.april_schedule is not None:
-            stats['Critical Sites'] = (self.april_schedule['Visit Type'] == 'CRITICAL').sum()
-            stats['PM Sites'] = self.april_schedule['Visit Type'].str.contains('PM', na=False).sum()
-            stats['Project Sites'] = self.april_schedule['Visit Type'].str.contains('PROJECT', na=False).sum()
-            stats['Routine Sites'] = (self.april_schedule['Visit Type'] == 'ROUTINE').sum()
-            stats['Total PM Hours'] = self.april_schedule['Duration (hours)'].sum()
+        if self.april_schedule is not None and len(self.april_schedule) > 0:
+            # Count by activity type (new data structure)
+            stats['Preventive Maintenance'] = (self.april_schedule['Activity'] == 'Preventive Maintenance').sum()
+            stats['Project Site Visits'] = (self.april_schedule['Activity'] == 'Project Site Visit').sum()
+            stats['Routine Visits'] = (self.april_schedule['Activity'] == 'Routine Visit').sum()
         
         high_priority = self.identify_high_priority_sites()
         stats['High Priority Count'] = len(high_priority)
         
         self.summary_stats = stats
-        self.log_message(f"✅ Summary statistics created")
+        self.log_message(f"✅ Summary statistics created: {stats}")
         return stats
     
     def create_excel_report(self, output_filename: str = "HT_Site_Visit_Calendar_April_2026.xlsx"):
@@ -340,7 +417,7 @@ class AprilReportGenerator:
         
         ws.column_dimensions['A'].width = 100
     
-    def run_analysis(self, files: Dict[str, str]) -> bool:
+    def run_analysis(self, files: Dict[str, str], output_filename: str = "HT_Site_Visit_Calendar_April_2026.xlsx") -> bool:
         """Execute complete analysis pipeline."""
         self.log_message("Starting April Site Visit Analysis...")
         
@@ -349,7 +426,7 @@ class AprilReportGenerator:
         
         self.generate_april_schedule()
         self.create_summary_statistics()
-        self.create_excel_report()
+        self.create_excel_report(output_filename)
         
         self.log_message("✅ Analysis complete!")
         return True
@@ -385,7 +462,7 @@ def main():
     
     # Run generator
     generator = AprilReportGenerator(output_folder=args.output)
-    success = generator.run_analysis(files)
+    success = generator.run_analysis(files, args.report_name)
     
     return 0 if success else 1
 
