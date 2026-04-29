@@ -39,21 +39,25 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: main
+          ref: ${{ github.ref }}
           token: ${{ github.token }}
+          clean: true
 
-      - name: Verify latest version checked out
+      - name: Verify checkout is latest version
         run: |
-          echo "🔍 Repository Status:"
-          echo "  Current branch: $(git branch --show-current)"
-          echo "  Latest commit: $(git log -1 --oneline)"
-          echo "  Latest tag: $(git describe --tags --always 2>/dev/null || echo 'No tags')"
+          echo "🔍 Verifying checkout..."
+          echo "Current branch: $(git branch --show-current)"
+          echo "Latest commit: $(git log -1 --oneline)"
+          echo "Latest tag: $(git describe --tags --always)"
           echo ""
-          echo "📁 Directory structure:"
-          ls -la
+          echo "📁 Repository structure:"
+          ls -lah
           echo ""
-          echo "📁 Data directory:"
-          ls -la data/ 2>/dev/null || echo "  No data directory"
+          echo "📁 Data directory contents:"
+          ls -lah data/ || echo "No data directory"
+          echo ""
+          echo "📁 Data/uploads directory contents:"
+          ls -lah data/uploads/ || echo "No data/uploads directory"
 
       - name: Create directories
         run: |
@@ -141,123 +145,31 @@ jobs:
       - name: Verify required files
         run: |
           mkdir -p data/uploads
-          
-          echo "🔍 Verifying required files..."
-          echo ""
-          echo "Looking for input files in data/uploads and data directories..."
-          echo ""
-          
-          # Get filenames from inputs
-          site_master="${{ github.event.inputs.site_master }}"
-          hts_calendar="${{ github.event.inputs.hts_calendar }}"
-          pm_assignments="${{ github.event.inputs.pm_assignments }}"
-          project_sites="${{ github.event.inputs.project_sites }}"
-          critical_sites="${{ github.event.inputs.critical_sites }}"
-          
-          # Check each file in multiple locations
-          find_file() {
-            local filename=$1
-            local description=$2
-            
-            # Check data/uploads
-            if [ -f "data/uploads/$filename" ]; then
-              echo "✅ Found: data/uploads/$filename"
-              return 0
-            fi
-            
-            # Check data directory
-            if [ -f "data/$filename" ]; then
-              echo "✅ Found: data/$filename"
-              cp "data/$filename" "data/uploads/"
-              return 0
-            fi
-            
-            # Check current directory
-            if [ -f "$filename" ]; then
-              echo "✅ Found: $filename"
-              cp "$filename" "data/uploads/"
-              return 0
-            fi
-            
-            echo "⚠️  $description not found: $filename"
-            return 1
-          }
-          
-          echo "Current directory structure:"
-          ls -lah data/ 2>/dev/null || echo "  - No data directory"
-          echo ""
-          
-          # Try to find files
-          find_file "$site_master" "Site Master" || true
-          find_file "$hts_calendar" "HTS Calendar" || true
-          find_file "$pm_assignments" "PM Assignments" || true
-          find_file "$project_sites" "Project Sites" || true
-          find_file "$critical_sites" "Critical Sites" || true
-          
-          echo ""
-          echo "📁 Files in data/uploads:"
-          ls -lah data/uploads/ || echo "No files found"
-          echo ""
-          echo "ℹ️  Note: If files are still missing, please:"
-          echo "   1. Commit files to data/uploads/ in the repository"
-          echo "   2. Push changes to GitHub"
-          echo "   3. Re-run the workflow"
+          python scripts/verify_files.py \
+            "data/uploads/${{ github.event.inputs.site_master }}" \
+            "data/uploads/${{ github.event.inputs.hts_calendar }}" \
+            "data/uploads/${{ github.event.inputs.pm_assignments }}" \
+            "data/uploads/${{ github.event.inputs.project_sites }}" \
+            "data/uploads/${{ github.event.inputs.critical_sites }}" \
+            || { echo "❌ File verification failed"; exit 1; }
 
       - name: Generate April Report
         run: |
           echo "📊 Starting April Report Generation..."
           echo ""
-          
-          # Get filenames from inputs
-          site_master="${{ github.event.inputs.site_master }}"
-          hts_calendar="${{ github.event.inputs.hts_calendar }}"
-          pm_assignments="${{ github.event.inputs.pm_assignments }}"
-          project_sites="${{ github.event.inputs.project_sites }}"
-          critical_sites="${{ github.event.inputs.critical_sites }}"
-          
           echo "📁 Files available in data/uploads:"
           ls -lh data/uploads/ || echo "No files found"
           echo ""
           
-          # Check if any required files exist
-          echo "🔍 Checking for input files..."
-          
-          if [ -z "$site_master" ] && [ -z "$hts_calendar" ] && [ -z "$pm_assignments" ] && [ -z "$project_sites" ] && [ -z "$critical_sites" ]; then
-            echo "⚠️  No input files specified. Using available files from data/uploads."
-            echo ""
-            # Use what's available
-            site_master=$(ls data/uploads/*.xlsx 2>/dev/null | head -1 || echo "")
-            if [ -z "$site_master" ]; then
-              echo "❌ ERROR: No Excel files found in data/uploads/"
-              echo "Please commit input files to data/uploads/ in the repository and re-run the workflow"
-              exit 1
-            fi
-          fi
-          
-          echo "✅ Using the following files:"
-          [ -n "$site_master" ] && echo "  - Site Master: $site_master" || echo "  - Site Master: (not provided)"
-          [ -n "$hts_calendar" ] && echo "  - HTS Calendar: $hts_calendar" || echo "  - HTS Calendar: (not provided)"
-          [ -n "$pm_assignments" ] && echo "  - PM Assignments: $pm_assignments" || echo "  - PM Assignments: (not provided)"
-          [ -n "$project_sites" ] && echo "  - Project Sites: $project_sites" || echo "  - Project Sites: (not provided)"
-          [ -n "$critical_sites" ] && echo "  - Critical Sites: $critical_sites" || echo "  - Critical Sites: (not provided)"
-          echo ""
-          echo "🔧 Running april_analysis.py..."
-          echo ""
-          
           python scripts/april_analysis.py \
-            $([ -n "$site_master" ] && echo "--site-master 'data/uploads/$site_master'" || true) \
-            $([ -n "$hts_calendar" ] && echo "--hts-calendar 'data/uploads/$hts_calendar'" || true) \
-            $([ -n "$pm_assignments" ] && echo "--pm-assignments 'data/uploads/$pm_assignments'" || true) \
-            $([ -n "$project_sites" ] && echo "--project-sites 'data/uploads/$project_sites'" || true) \
-            $([ -n "$critical_sites" ] && echo "--critical-sites 'data/uploads/$critical_sites'" || true) \
+            --site-master "data/uploads/${{ github.event.inputs.site_master }}" \
+            --hts-calendar "data/uploads/${{ github.event.inputs.hts_calendar }}" \
+            --pm-assignments "data/uploads/${{ github.event.inputs.pm_assignments }}" \
+            --project-sites "data/uploads/${{ github.event.inputs.project_sites }}" \
+            --critical-sites "data/uploads/${{ github.event.inputs.critical_sites }}" \
             --output output \
-            --report-name "${{ github.event.inputs.output_name }}" || { echo "❌ Script execution failed"; exit 1; }
-          
-          echo ""
-          echo "✅ Report generation completed"
-          echo ""
-          echo "📁 Output files generated:"
-          ls -lh output/ || echo "No output files"
+            --report-name "${{ github.event.inputs.output_name }}" \
+            || { echo "❌ Script execution failed"; exit 1; }
 
       - name: Verify Report
         run: |
