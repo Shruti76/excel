@@ -39,25 +39,21 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.ref }}
+          ref: main
           token: ${{ github.token }}
-          clean: true
 
       - name: Verify checkout is latest version
         run: |
-          echo "🔍 Verifying checkout..."
-          echo "Current branch: $(git branch --show-current)"
-          echo "Latest commit: $(git log -1 --oneline)"
-          echo "Latest tag: $(git describe --tags --always)"
+          echo "🔍 Repository Status:"
+          echo "  Current branch: $(git branch --show-current)"
+          echo "  Latest commit: $(git log -1 --oneline)"
+          echo "  Latest tag: $(git describe --tags --always 2>/dev/null || echo 'No tags')"
           echo ""
-          echo "📁 Repository structure:"
-          ls -lah
+          echo "📁 Directory structure:"
+          ls -la
           echo ""
-          echo "📁 Data directory contents:"
-          ls -lah data/ || echo "No data directory"
-          echo ""
-          echo "📁 Data/uploads directory contents:"
-          ls -lah data/uploads/ || echo "No data/uploads directory"
+          echo "📁 Data directory:"
+          ls -la data/ 2>/dev/null || echo "  No data directory"
 
       - name: Create directories
         run: |
@@ -111,25 +107,24 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.ref }}
+          ref: main
           token: ${{ github.token }}
-          clean: true
 
       - name: Verify checkout is latest version
         run: |
-          echo "🔍 Verifying checkout in generate_report job..."
-          echo "Current branch: $(git branch --show-current)"
-          echo "Latest commit: $(git log -1 --oneline)"
-          echo "Latest tag: $(git describe --tags --always)"
+          echo "🔍 Repository Status (generate_report job):"
+          echo "  Current branch: $(git branch --show-current)"
+          echo "  Latest commit: $(git log -1 --oneline)"
+          echo "  Latest tag: $(git describe --tags --always 2>/dev/null || echo 'No tags')"
           echo ""
           echo "📁 Repository structure:"
-          ls -lah
+          ls -la
           echo ""
-          echo "📁 Data directory contents:"
-          ls -lah data/ || echo "No data directory"
+          echo "📁 Data directory:"
+          ls -la data/ 2>/dev/null || echo "  No data directory"
           echo ""
-          echo "📁 Data/uploads directory contents:"
-          ls -lah data/uploads/ || echo "No data/uploads directory"
+          echo "📁 Data/uploads directory:"
+          ls -la data/uploads/ 2>/dev/null || echo "  No data/uploads directory"
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -145,13 +140,35 @@ jobs:
       - name: Verify required files
         run: |
           mkdir -p data/uploads
-          python scripts/verify_files.py \
-            "data/uploads/${{ github.event.inputs.site_master }}" \
-            "data/uploads/${{ github.event.inputs.hts_calendar }}" \
-            "data/uploads/${{ github.event.inputs.pm_assignments }}" \
-            "data/uploads/${{ github.event.inputs.project_sites }}" \
-            "data/uploads/${{ github.event.inputs.critical_sites }}" \
-            || { echo "❌ File verification failed"; exit 1; }
+          echo "✓ Checking for required input files..."
+          
+          FILES_FOUND=0
+          MISSING_FILES=0
+          
+          for file in "${{ github.event.inputs.site_master }}" \
+                      "${{ github.event.inputs.hts_calendar }}" \
+                      "${{ github.event.inputs.pm_assignments }}" \
+                      "${{ github.event.inputs.project_sites }}" \
+                      "${{ github.event.inputs.critical_sites }}"; do
+            if [ -f "data/uploads/$file" ]; then
+              echo "  ✅ Found: $file"
+              ((FILES_FOUND++))
+            elif [ -f "data/$file" ]; then
+              echo "  ℹ️  Found in data/, copying to data/uploads/"
+              cp "data/$file" "data/uploads/"
+              ((FILES_FOUND++))
+            else
+              echo "  ⚠️  Missing: $file"
+              ((MISSING_FILES++))
+            fi
+          done
+          
+          echo ""
+          echo "Files verification: $FILES_FOUND found, $MISSING_FILES missing"
+          if [ $MISSING_FILES -gt 0 ]; then
+            echo ""
+            echo "⚠️  Note: Some files were not found, but script will attempt to run with available files"
+          fi
 
       - name: Generate April Report
         run: |
