@@ -3,12 +3,28 @@
 April Site Visit Calendar Analysis Script
 Processes 5 types of input files and generates comprehensive April report
 
-File Types:
-1. Colo_Sonatel-APS.xlsx - Site master data (ID, name, type, project)
-2. HTS Site Visits Calendar - Planning schedule with visit history
-3. PM_ZONE1_2_MARS_2026.xlsx - Preventive maintenance assignments
-4. Project sites BNS plan - Project-based site requirements
-5. RT High Risk List - Critical/failed sites requiring priority visits
+File Mapping:
+1. Colo_Sonatel-APS.xlsx:
+   - Columns: nearest Helios site ID, Nearest Helios site distance, Tower type, Site ID (YAS SID), Site Name, Projet
+   - Used for: Base site reference mapping (Helios → YAS)
+
+2. HTS Site Visits Calendar (Planning sheet):
+   - Row 3-6 headers: Activity, site ID, Name, Location Type, Latitude, Longitude, (empty), (empty), Region, Mois, Technical Staff, Non-Tech 1, Non-Tech 2, Date, SARID
+   - March data used as reference for April planning
+   - Used for: Activity type, staff assignments, location details
+
+3. PM_ZONE1_2_MARS_2026.xlsx:
+   - Columns: YAS SID, HTS SID (Helios), Assigned to, Planning Date
+   - Mars (March) dates - adjust to April
+   - Used for: Preventive Maintenance visits with Lat/Lon from site master
+
+4. Project sites BNS plan:
+   - Columns include: Helios Site ID (SNKL...), YAS Site ID, Region, Activity, Lat, Long
+   - Used for: Project-based site visits
+
+5. RT High Risk List:
+   - Identifies sites to EXCLUDE (dangerous/failed)
+   - Used for: Filtering out risky sites from all sources
 """
 
 import pandas as pd
@@ -152,106 +168,207 @@ class AprilReportGenerator:
         self.log_message(f"📊 Total unique sites identified: {len(site_ids)}")
         return site_ids
     
+    def _get_site_master_lookup(self) -> dict:
+        """Create lookup dict for site master: YAS SID -> (Helios ID, Name, Tower Type, Project)"""
+        lookup = {}
+        if self.site_master is not None and len(self.site_master) > 0:
+            for idx, row in self.site_master.iterrows():
+                yas_sid = str(row.iloc[3]) if pd.notna(row.iloc[3]) else None  # Site ID (col 4)
+                if yas_sid:
+                    lookup[yas_sid] = {
+                        'helios_id': row.iloc[0] if pd.notna(row.iloc[0]) else '',  # nearest Helios site ID
+                        'name': row.iloc[4] if pd.notna(row.iloc[4]) else '',  # Site Name (col 5)
+                        'tower_type': row.iloc[2] if pd.notna(row.iloc[2]) else '',  # Tower type (col 3)
+                        'project': row.iloc[5] if pd.notna(row.iloc[5]) else ''  # Project (col 6)
+                    }
+        return lookup
+    
     def generate_april_schedule(self) -> pd.DataFrame:
         """
-        Generate April visit schedule combining all sources but EXCLUDING high-risk sites.
-        Prioritizes PM maintenance activity assignments over routine visits.
+        Generate April visit schedule combining all 5 sources with proper date distribution and data merging.
+        Maps Helios IDs and YAS SIDs with Lat/Lon, filters high-risk sites.
         """
-        self.log_message("Generating April schedule (excluding high-risk sites)...")
+        self.log_message("Generating comprehensive April schedule (all sources)...")
         
         schedule_data = []
         processed_sites = set()
+        site_master_lookup = self._get_site_master_lookup()
         
-        # Priority 1: Process PM Assignments (Preventive Maintenance) first
+        # ===== PRIORITY 1: PM_ZONE1_2_MARS files (Preventive Maintenance with dates) =====
         if self.pm_assignments is not None and len(self.pm_assignments) > 0:
-            self.log_message(f"  Processing {len(self.pm_assignments)} PM assignments...")
+            self.log_message(f"  Processing {len(self.pm_assignments)} PM Assignments...")
             for idx, row in self.pm_assignments.iterrows():
-                # Extract site ID
-                id_cols = [c for c in self.pm_assignments.columns if 'id' in c.lower() or 'sid' in c.lower()]
-                site_id = None
-                for col in id_cols:
-                    if pd.notna(row[col]):
-                        site_id = str(row[col])
-                        break
+                # PM file structure: YAS SID (col 1), HTS SID/Helios (col 2), Assigned to (col 3), Planning Date (col 4)
+                yas_sid = str(row.iloc[0]) if pd.notna(row.iloc[0]) else None
+                helios_sid = str(row.iloc[1]) if pd.notna(row.iloc[1]) else None
+                assigned_to = row.iloc[2] if pd.notna(row.iloc[2]) else ''
+                planning_date = row.iloc[3] if pd.notna(row.iloc[3]) else None
                 
+                # Convert March dates to April (shift by ~4 weeks)
+                if planning_date and hasattr(planning_date, 'month'):
+                    if planning_date.month == 3:  # If March date
+                        april_date = planning_date.replace(month=4)
+                    else:
+                        april_date = planning_date
+                else:
+                    april_date = datetime(2026, 4, 1)
+                
+                site_id = yas_sid or helios_sid
                 if site_id and site_id not in self.high_risk_site_ids and site_id not in processed_sites:
                     processed_sites.add(site_id)
+                    
+                    # Get site info from lookup
+                    site_info = site_master_lookup.get(yas_sid, {}) if yas_sid else {}
+                    
                     schedule_data.append({
                         'Activity': 'Preventive Maintenance',
-                        'Site ID': site_id,
-                        'Name': row.get('Name', ''),
-                        'Location Type': row.get('Indoor / Outdoor / Enclosure', ''),
-                        'Latitude': row.get('Latitude', ''),
-                        'Longitude': row.get('Longitude', ''),
-                        'Region': row.get('Region', ''),
+                        'Site ID': yas_sid or helios_sid,
+                        'Name': site_info.get('name', ''),
+                        'Location Type': site_info.get('tower_type', ''),
+                        'Latitude': '',  # Will be populated later if available
+                        'Longitude': '',
+                        'Region': '',
                         'Month': 'April',
-                        'Technical Staff': row.get('Technical HTS staff', ''),
-                        'Non-Tech Staff 1': row.get('No Technical HTS Staff_1', ''),
-                        'Non-Tech Staff 2': row.get('No Technical HTS Staff_2', ''),
-                        'Date': row.get('Planned or Started date', datetime(2026, 4, 1)),
-                        'SARID': row.get('SARID', '')
+                        'Technical Staff': assigned_to,
+                        'Non-Tech Staff 1': '',
+                        'Non-Tech Staff 2': '',
+                        'Date': april_date,
+                        'SARID': ''
                     })
         
-        # Priority 2: Process Project Sites
+        # ===== PRIORITY 2: Colo_Sonatel (Site Master data) =====
+        if self.site_master is not None and len(self.site_master) > 0:
+            self.log_message(f"  Processing {len(self.site_master)} Site Master entries...")
+            for idx, row in self.site_master.iterrows():
+                yas_sid = str(row.iloc[3]) if pd.notna(row.iloc[3]) else None
+                
+                if yas_sid and yas_sid not in self.high_risk_site_ids and yas_sid not in processed_sites:
+                    processed_sites.add(yas_sid)
+                    
+                    schedule_data.append({
+                        'Activity': 'Site Survey',
+                        'Site ID': yas_sid,
+                        'Name': row.iloc[4] if pd.notna(row.iloc[4]) else '',
+                        'Location Type': row.iloc[2] if pd.notna(row.iloc[2]) else '',
+                        'Latitude': '',
+                        'Longitude': '',
+                        'Region': '',
+                        'Month': 'April',
+                        'Technical Staff': '',
+                        'Non-Tech Staff 1': '',
+                        'Non-Tech Staff 2': '',
+                        'Date': datetime(2026, 4, 15),  # Mid-April default
+                        'SARID': ''
+                    })
+        
+        # ===== PRIORITY 3: Project Sites BNS plan (with Lat/Lon) =====
         if self.project_sites is not None and len(self.project_sites) > 0:
-            self.log_message(f"  Processing {len(self.project_sites)} project sites...")
+            self.log_message(f"  Processing {len(self.project_sites)} Project Sites...")
             for idx, row in self.project_sites.iterrows():
-                id_cols = [c for c in self.project_sites.columns if 'id' in c.lower() or 'sid' in c.lower()]
-                site_id = None
-                for col in id_cols:
-                    if pd.notna(row[col]):
-                        site_id = str(row[col])
-                        break
+                # Find Helios and YAS columns
+                helios_id = None
+                yas_id = None
+                lat = None
+                lon = None
+                activity = ''
                 
+                for col_idx, cell_val in enumerate(row):
+                    col_name = str(cell_val).lower() if col_idx < 1 else ''
+                    if pd.isna(cell_val):
+                        continue
+                    
+                    cell_str = str(cell_val)
+                    if cell_str.startswith('SN'):  # Helios ID pattern
+                        if not helios_id:
+                            helios_id = cell_str
+                    elif cell_str.startswith('DK'):  # YAS ID pattern
+                        if not yas_id:
+                            yas_id = cell_str
+                    elif isinstance(cell_val, (int, float)):  # Coordinates
+                        try:
+                            fval = float(cell_val)
+                            if -180 <= fval <= 180:  # Lat/Lon validation
+                                if lat is None and fval < 90:
+                                    lat = fval
+                                elif lon is None:
+                                    lon = fval
+                        except:
+                            pass
+                
+                site_id = yas_id or helios_id
                 if site_id and site_id not in self.high_risk_site_ids and site_id not in processed_sites:
                     processed_sites.add(site_id)
+                    
                     schedule_data.append({
-                        'Activity': 'Project Site Visit',
+                        'Activity': 'Project Site',
                         'Site ID': site_id,
-                        'Name': row.get('Name', ''),
-                        'Location Type': row.get('Indoor / Outdoor / Enclosure', ''),
-                        'Latitude': row.get('Latitude', ''),
-                        'Longitude': row.get('Longitude', ''),
-                        'Region': row.get('Region', ''),
+                        'Name': '',
+                        'Location Type': '',
+                        'Latitude': lat or '',
+                        'Longitude': lon or '',
+                        'Region': '',
                         'Month': 'April',
-                        'Technical Staff': row.get('Technical HTS staff', ''),
-                        'Non-Tech Staff 1': row.get('No Technical HTS Staff_1', ''),
-                        'Non-Tech Staff 2': row.get('No Technical HTS Staff_2', ''),
-                        'Date': row.get('Planned or Started date', datetime(2026, 4, 1)),
-                        'SARID': row.get('SARID', '')
+                        'Technical Staff': '',
+                        'Non-Tech Staff 1': '',
+                        'Non-Tech Staff 2': '',
+                        'Date': datetime(2026, 4, 22),  # Late April
+                        'SARID': ''
                     })
         
-        # Priority 3: Process HTS Calendar (Remaining routine visits)
+        # ===== PRIORITY 4: HTS Calendar (Reference data) =====
         if self.hts_calendar is not None and len(self.hts_calendar) > 0:
-            self.log_message(f"  Processing {len(self.hts_calendar)} HTS calendar entries...")
+            self.log_message(f"  Processing {len(self.hts_calendar)} HTS Calendar entries...")
             for idx, row in self.hts_calendar.iterrows():
-                id_cols = [c for c in self.hts_calendar.columns if 'id' in c.lower() or 'sid' in c.lower()]
+                # Extract site ID from multiple possible columns
                 site_id = None
-                for col in id_cols:
-                    if pd.notna(row[col]):
-                        site_id = str(row[col])
-                        break
+                activity = ''
+                name = ''
+                lat = None
+                lon = None
+                tech_staff = ''
+                non_tech_1 = ''
+                non_tech_2 = ''
+                
+                for col_idx, cell_val in enumerate(row):
+                    if pd.isna(cell_val):
+                        continue
+                    cell_str = str(cell_val).lower()
+                    if 'preventive' in cell_str or 'maintenance' in cell_str:
+                        activity = str(cell_val)
+                    elif str(cell_val).startswith(('DK', 'SN')) and not site_id:
+                        site_id = str(cell_val)
+                    elif isinstance(cell_val, (int, float)):
+                        try:
+                            fval = float(cell_val)
+                            if -180 <= fval <= 180:
+                                if lat is None and -90 <= fval <= 90:
+                                    lat = fval
+                                elif lon is None and -180 <= fval <= 180 and fval != lat:
+                                    lon = fval
+                        except:
+                            pass
                 
                 if site_id and site_id not in self.high_risk_site_ids and site_id not in processed_sites:
                     processed_sites.add(site_id)
+                    
                     schedule_data.append({
-                        'Activity': row.get('Activity', 'Routine Visit'),
+                        'Activity': activity or 'HTS Inspection',
                         'Site ID': site_id,
-                        'Name': row.get('Name', ''),
-                        'Location Type': row.get('Indoor / Outdoor / Enclosure', ''),
-                        'Latitude': row.get('Latitude', ''),
-                        'Longitude': row.get('Longitude', ''),
-                        'Region': row.get('Region', ''),
+                        'Name': name,
+                        'Location Type': '',
+                        'Latitude': lat or '',
+                        'Longitude': lon or '',
+                        'Region': '',
                         'Month': 'April',
-                        'Technical Staff': row.get('Technical HTS staff', ''),
-                        'Non-Tech Staff 1': row.get('No Technical HTS Staff_1', ''),
-                        'Non-Tech Staff 2': row.get('No Technical HTS Staff_2', ''),
-                        'Date': row.get('Planned or Started date', datetime(2026, 4, 1)),
-                        'SARID': row.get('SARID', '')
+                        'Technical Staff': tech_staff,
+                        'Non-Tech Staff 1': non_tech_1,
+                        'Non-Tech Staff 2': non_tech_2,
+                        'Date': datetime(2026, 4, 8),  # Early April
+                        'SARID': ''
                     })
         
         self.april_schedule = pd.DataFrame(schedule_data)
-        self.log_message(f"✅ April schedule generated: {len(self.april_schedule)} visits (high-risk sites excluded)")
+        self.log_message(f"✅ April schedule generated: {len(self.april_schedule)} visits (from all 5 sources, high-risk excluded)")
         return self.april_schedule
     
     def analyze_pm_workload(self) -> pd.DataFrame:
