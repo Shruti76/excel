@@ -179,37 +179,71 @@ class AprilReportGenerator:
                         'helios_id': row.iloc[0] if pd.notna(row.iloc[0]) else '',  # nearest Helios site ID
                         'name': row.iloc[4] if pd.notna(row.iloc[4]) else '',  # Site Name (col 5)
                         'tower_type': row.iloc[2] if pd.notna(row.iloc[2]) else '',  # Tower type (col 3)
-                        'project': row.iloc[5] if pd.notna(row.iloc[5]) else ''  # Project (col 6)
+                        'project': row.iloc[5] if pd.notna(row.iloc[5]) else '',  # Project (col 6)
+                        'latitude': '',
+                        'longitude': ''
                     }
         return lookup
     
+    def _get_engineer_pool(self) -> dict:
+        """Get engineer pools from March reference or define default pools."""
+        # Tech staff pool
+        tech_staff = [
+            'Bara Diokhané', 'Boubacar Mbeguere', 'Ousman Diouf', 'Abdoul Aziz Seck'
+        ]
+        # Non-tech staff pool (Group 1 & 2)
+        non_tech_pool = [
+            'Koudjo Guy Gameda', 'Djienaba Fall', 'Victor Bocande', 'Cheikh Niang',
+            'Mahib Samb', 'Marième Gno Dia', 'Hamedine Fall Thiam', 'Ahmad Toure'
+        ]
+        return {'tech': tech_staff, 'non_tech': non_tech_pool}
+    
+    def _assign_staff(self, visit_index: int, engineer_pools: dict) -> tuple:
+        """Assign tech and non-tech staff based on visit index (rotates through pools)."""
+        tech_staff = engineer_pools['tech']
+        non_tech_pool = engineer_pools['non_tech']
+        
+        # Rotate through tech staff
+        tech_idx = visit_index % len(tech_staff)
+        tech = tech_staff[tech_idx]
+        
+        # Assign 2 non-tech staff (different pair for each tech staff)
+        non_tech_start = (visit_index * 2) % len(non_tech_pool)
+        non_tech_1 = non_tech_pool[non_tech_start]
+        non_tech_2 = non_tech_pool[(non_tech_start + 1) % len(non_tech_pool)]
+        
+        return tech, non_tech_1, non_tech_2
+    
     def generate_april_schedule(self) -> pd.DataFrame:
         """
-        Generate April visit schedule combining all 5 sources with proper date distribution and data merging.
-        Maps Helios IDs and YAS SIDs with Lat/Lon, filters high-risk sites.
+        Generate April visit schedule combining all 5 sources with proper:
+        - Activity types from each source
+        - Engineer assignment for April only (not repeating throughout year)
+        - 2 non-technical staff per visit like March reference
+        - Varied dates throughout April
         """
-        self.log_message("Generating comprehensive April schedule (all sources)...")
+        self.log_message("Generating comprehensive April schedule (all sources, April-only assignments)...")
         
         schedule_data = []
         processed_sites = set()
         site_master_lookup = self._get_site_master_lookup()
+        engineer_pools = self._get_engineer_pool()
+        visit_count = 0
         
-        # ===== PRIORITY 1: PM_ZONE1_2_MARS files (Preventive Maintenance with dates) =====
+        # ===== PRIORITY 1: PM_ZONE1_2 (Preventive Maintenance - from assigned_to column) =====
         if self.pm_assignments is not None and len(self.pm_assignments) > 0:
-            self.log_message(f"  Processing {len(self.pm_assignments)} PM Assignments...")
+            self.log_message(f"  Processing {len(self.pm_assignments)} PM Assignments (Preventive Maintenance)...")
             for idx, row in self.pm_assignments.iterrows():
-                # PM file structure: YAS SID (col 1), HTS SID/Helios (col 2), Assigned to (col 3), Planning Date (col 4)
+                # PM file: YAS SID (col 1), HTS SID (col 2), Assigned to (col 3), Planning Date (col 4)
                 yas_sid = str(row.iloc[0]) if pd.notna(row.iloc[0]) else None
                 helios_sid = str(row.iloc[1]) if pd.notna(row.iloc[1]) else None
-                assigned_to = row.iloc[2] if pd.notna(row.iloc[2]) else ''
+                assigned_to = row.iloc[2] if pd.notna(row.iloc[2]) else None
                 planning_date = row.iloc[3] if pd.notna(row.iloc[3]) else None
                 
-                # Convert March dates to April (shift by ~4 weeks)
+                # Convert date to April (normalize all dates to April month)
                 if planning_date and hasattr(planning_date, 'month'):
-                    if planning_date.month == 3:  # If March date
-                        april_date = planning_date.replace(month=4)
-                    else:
-                        april_date = planning_date
+                    # Keep the day/hour info but change month to April
+                    april_date = planning_date.replace(month=4, year=2026)
                 else:
                     april_date = datetime(2026, 4, 1)
                 
@@ -217,36 +251,51 @@ class AprilReportGenerator:
                 if site_id and site_id not in self.high_risk_site_ids and site_id not in processed_sites:
                     processed_sites.add(site_id)
                     
-                    # Get site info from lookup
+                    # Get site info from Colo_Sonatel lookup
                     site_info = site_master_lookup.get(yas_sid, {}) if yas_sid else {}
+                    
+                    # Use assigned_to if available, otherwise rotate
+                    if assigned_to and pd.notna(assigned_to):
+                        tech_staff = str(assigned_to).strip()
+                        _, non_tech_1, non_tech_2 = self._assign_staff(visit_count, engineer_pools)
+                    else:
+                        tech_staff, non_tech_1, non_tech_2 = self._assign_staff(visit_count, engineer_pools)
                     
                     schedule_data.append({
                         'Activity': 'Preventive Maintenance',
                         'Site ID': yas_sid or helios_sid,
                         'Name': site_info.get('name', ''),
                         'Location Type': site_info.get('tower_type', ''),
-                        'Latitude': '',  # Will be populated later if available
-                        'Longitude': '',
+                        'Latitude': site_info.get('latitude', ''),
+                        'Longitude': site_info.get('longitude', ''),
                         'Region': '',
                         'Month': 'April',
-                        'Technical Staff': assigned_to,
-                        'Non-Tech Staff 1': '',
-                        'Non-Tech Staff 2': '',
+                        'Technical Staff': tech_staff,
+                        'Non-Tech Staff 1': non_tech_1,
+                        'Non-Tech Staff 2': non_tech_2,
                         'Date': april_date,
                         'SARID': ''
                     })
+                    visit_count += 1
         
-        # ===== PRIORITY 2: Colo_Sonatel (Site Master data) =====
+        # ===== PRIORITY 2: Colo_Sonatel (Site Survey activity) =====
         if self.site_master is not None and len(self.site_master) > 0:
-            self.log_message(f"  Processing {len(self.site_master)} Site Master entries...")
+            self.log_message(f"  Processing {len(self.site_master)} Site Master entries (Colo Sonatel)...")
             for idx, row in self.site_master.iterrows():
                 yas_sid = str(row.iloc[3]) if pd.notna(row.iloc[3]) else None
                 
                 if yas_sid and yas_sid not in self.high_risk_site_ids and yas_sid not in processed_sites:
                     processed_sites.add(yas_sid)
                     
+                    tech_staff, non_tech_1, non_tech_2 = self._assign_staff(visit_count, engineer_pools)
+                    
+                    # Distribute April dates - roughly 2-3 per week
+                    week_num = (visit_count % 4) + 1
+                    day_offset = ((visit_count % 3) * 3)
+                    april_date = datetime(2026, 4, 1) + timedelta(days=(week_num-1)*7 + day_offset)
+                    
                     schedule_data.append({
-                        'Activity': 'Site Survey',
+                        'Activity': 'Site Survey - Colo Sonatel',
                         'Site ID': yas_sid,
                         'Name': row.iloc[4] if pd.notna(row.iloc[4]) else '',
                         'Location Type': row.iloc[2] if pd.notna(row.iloc[2]) else '',
@@ -254,43 +303,51 @@ class AprilReportGenerator:
                         'Longitude': '',
                         'Region': '',
                         'Month': 'April',
-                        'Technical Staff': '',
-                        'Non-Tech Staff 1': '',
-                        'Non-Tech Staff 2': '',
-                        'Date': datetime(2026, 4, 15),  # Mid-April default
+                        'Technical Staff': tech_staff,
+                        'Non-Tech Staff 1': non_tech_1,
+                        'Non-Tech Staff 2': non_tech_2,
+                        'Date': april_date,
                         'SARID': ''
                     })
+                    visit_count += 1
         
-        # ===== PRIORITY 3: Project Sites BNS plan (with Lat/Lon) =====
+        # ===== PRIORITY 3: Project Sites BNS plan (with activity column) =====
         if self.project_sites is not None and len(self.project_sites) > 0:
-            self.log_message(f"  Processing {len(self.project_sites)} Project Sites...")
+            self.log_message(f"  Processing {len(self.project_sites)} Project Sites (BNS plan)...")
             for idx, row in self.project_sites.iterrows():
-                # Find Helios and YAS columns
+                # Find Helios, YAS, Activity, and coordinates
                 helios_id = None
                 yas_id = None
                 lat = None
                 lon = None
-                activity = ''
+                activity = 'Project Site'
                 
                 for col_idx, cell_val in enumerate(row):
-                    col_name = str(cell_val).lower() if col_idx < 1 else ''
                     if pd.isna(cell_val):
                         continue
                     
-                    cell_str = str(cell_val)
-                    if cell_str.startswith('SN'):  # Helios ID pattern
-                        if not helios_id:
-                            helios_id = cell_str
-                    elif cell_str.startswith('DK'):  # YAS ID pattern
-                        if not yas_id:
-                            yas_id = cell_str
-                    elif isinstance(cell_val, (int, float)):  # Coordinates
+                    cell_str = str(cell_val).strip()
+                    
+                    # Activity column (typically has BTS, etc.)
+                    if col_idx == 9 and cell_str and cell_str not in ['Activity', 'S/N']:
+                        activity = 'Project Site - ' + cell_str
+                    
+                    # Helios ID pattern (SN...)
+                    if cell_str.startswith('SN') and not helios_id:
+                        helios_id = cell_str
+                    
+                    # YAS ID pattern (DK...)
+                    elif cell_str.startswith('DK') and not yas_id:
+                        yas_id = cell_str
+                    
+                    # Coordinates
+                    elif isinstance(cell_val, (int, float)):
                         try:
                             fval = float(cell_val)
-                            if -180 <= fval <= 180:  # Lat/Lon validation
-                                if lat is None and fval < 90:
+                            if -180 <= fval <= 180:
+                                if lat is None and -90 <= fval <= 90:
                                     lat = fval
-                                elif lon is None:
+                                elif lon is None and lat is not None:
                                     lon = fval
                         except:
                             pass
@@ -299,62 +356,20 @@ class AprilReportGenerator:
                 if site_id and site_id not in self.high_risk_site_ids and site_id not in processed_sites:
                     processed_sites.add(site_id)
                     
-                    schedule_data.append({
-                        'Activity': 'Project Site',
-                        'Site ID': site_id,
-                        'Name': '',
-                        'Location Type': '',
-                        'Latitude': lat or '',
-                        'Longitude': lon or '',
-                        'Region': '',
-                        'Month': 'April',
-                        'Technical Staff': '',
-                        'Non-Tech Staff 1': '',
-                        'Non-Tech Staff 2': '',
-                        'Date': datetime(2026, 4, 22),  # Late April
-                        'SARID': ''
-                    })
-        
-        # ===== PRIORITY 4: HTS Calendar (Reference data) =====
-        if self.hts_calendar is not None and len(self.hts_calendar) > 0:
-            self.log_message(f"  Processing {len(self.hts_calendar)} HTS Calendar entries...")
-            for idx, row in self.hts_calendar.iterrows():
-                # Extract site ID from multiple possible columns
-                site_id = None
-                activity = ''
-                name = ''
-                lat = None
-                lon = None
-                tech_staff = ''
-                non_tech_1 = ''
-                non_tech_2 = ''
-                
-                for col_idx, cell_val in enumerate(row):
-                    if pd.isna(cell_val):
-                        continue
-                    cell_str = str(cell_val).lower()
-                    if 'preventive' in cell_str or 'maintenance' in cell_str:
-                        activity = str(cell_val)
-                    elif str(cell_val).startswith(('DK', 'SN')) and not site_id:
-                        site_id = str(cell_val)
-                    elif isinstance(cell_val, (int, float)):
-                        try:
-                            fval = float(cell_val)
-                            if -180 <= fval <= 180:
-                                if lat is None and -90 <= fval <= 90:
-                                    lat = fval
-                                elif lon is None and -180 <= fval <= 180 and fval != lat:
-                                    lon = fval
-                        except:
-                            pass
-                
-                if site_id and site_id not in self.high_risk_site_ids and site_id not in processed_sites:
-                    processed_sites.add(site_id)
+                    tech_staff, non_tech_1, non_tech_2 = self._assign_staff(visit_count, engineer_pools)
+                    
+                    # Distribute dates in third week onwards (stay within April 1-30)
+                    week_num = ((visit_count % 7) % 2) + 3  # Weeks 3-4
+                    day_offset = (visit_count % 7) * 3
+                    april_date = datetime(2026, 4, 1) + timedelta(days=(week_num-1)*7 + day_offset)
+                    # Clamp to April 1-30
+                    if april_date.month != 4:
+                        april_date = datetime(2026, 4, 30)
                     
                     schedule_data.append({
-                        'Activity': activity or 'HTS Inspection',
+                        'Activity': activity,
                         'Site ID': site_id,
-                        'Name': name,
+                        'Name': '',
                         'Location Type': '',
                         'Latitude': lat or '',
                         'Longitude': lon or '',
@@ -363,12 +378,60 @@ class AprilReportGenerator:
                         'Technical Staff': tech_staff,
                         'Non-Tech Staff 1': non_tech_1,
                         'Non-Tech Staff 2': non_tech_2,
-                        'Date': datetime(2026, 4, 8),  # Early April
+                        'Date': april_date,
                         'SARID': ''
                     })
+                    visit_count += 1
+        
+        # ===== PRIORITY 4: HTS Calendar (Reference data - safety inspections) =====
+        if self.hts_calendar is not None and len(self.hts_calendar) > 0:
+            self.log_message(f"  Processing {len(self.hts_calendar)} HTS Calendar entries (Safety Inspections)...")
+            for idx, row in self.hts_calendar.iterrows():
+                # Extract from HTS Calendar structure
+                site_id = None
+                activity = ''
+                
+                for col_idx, cell_val in enumerate(row):
+                    if pd.isna(cell_val):
+                        continue
+                    
+                    cell_str = str(cell_val).lower()
+                    
+                    # Activity column
+                    if col_idx == 0 and cell_str and 'preventive' not in cell_str:
+                        activity = str(cell_val)
+                    
+                    # Site ID columns
+                    elif str(cell_val).startswith(('DK', 'SN')) and not site_id:
+                        site_id = str(cell_val)
+                
+                if site_id and site_id not in self.high_risk_site_ids and site_id not in processed_sites:
+                    processed_sites.add(site_id)
+                    
+                    tech_staff, non_tech_1, non_tech_2 = self._assign_staff(visit_count, engineer_pools)
+                    
+                    # Early April dates for HTS
+                    april_date = datetime(2026, 4, 1) + timedelta(days=(visit_count % 10))
+                    
+                    schedule_data.append({
+                        'Activity': activity or 'HTS Safety Inspection',
+                        'Site ID': site_id,
+                        'Name': '',
+                        'Location Type': '',
+                        'Latitude': '',
+                        'Longitude': '',
+                        'Region': '',
+                        'Month': 'April',
+                        'Technical Staff': tech_staff,
+                        'Non-Tech Staff 1': non_tech_1,
+                        'Non-Tech Staff 2': non_tech_2,
+                        'Date': april_date,
+                        'SARID': ''
+                    })
+                    visit_count += 1
         
         self.april_schedule = pd.DataFrame(schedule_data)
-        self.log_message(f"✅ April schedule generated: {len(self.april_schedule)} visits (from all 5 sources, high-risk excluded)")
+        self.log_message(f"✅ April schedule generated: {len(self.april_schedule)} visits (April-only, all sources integrated)")
         return self.april_schedule
     
     def analyze_pm_workload(self) -> pd.DataFrame:
@@ -564,18 +627,17 @@ def main():
     
     args = parser.parse_args()
     
-    # Create file dictionary
+    # Create file dictionary with defaults
     files = {}
-    if args.site_master:
-        files['site_master'] = args.site_master
-    if args.hts_calendar:
-        files['hts_calendar'] = args.hts_calendar
-    if args.pm_assignments:
-        files['pm_assignments'] = args.pm_assignments
-    if args.project_sites:
-        files['project_sites'] = args.project_sites
-    if args.critical_sites:
-        files['critical_sites'] = args.critical_sites
+    
+    # Set default paths based on typical structure
+    base_path = Path(__file__).parent.parent / 'data'
+    
+    files['site_master'] = args.site_master or str(base_path / 'Colo_Sonatel-APS.xlsx')
+    files['hts_calendar'] = args.hts_calendar or str(base_path / 'HTS Site Visits Calendar March 26 R0 (1).xlsx')
+    files['pm_assignments'] = args.pm_assignments or str(base_path / 'PM_ZONE1_2_MARS_2026.xlsx')
+    files['project_sites'] = args.project_sites or str(base_path / 'Project sites BNS plan for March 2026.xlsx')
+    files['critical_sites'] = args.critical_sites or str(base_path / 'RT High Risk List_of_sites_BE_failed 1.xlsx')
     
     # Run generator
     generator = AprilReportGenerator(output_folder=args.output)
